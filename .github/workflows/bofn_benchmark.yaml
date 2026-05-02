@@ -30,7 +30,8 @@ on:
     inputs:
       seeds:
         description: >-
-          JSON array of seeds to run (default: 20 seeds).
+          JSON array of seeds to run (default: 30 seeds, matching the 30
+          replications used in Buathong et al. 2024, ICML).
           Example: "[0,1,2]" for a 3-seed debug run.
         required: false
         default: ''
@@ -97,7 +98,7 @@ jobs:
         seed: ${{ fromJSON(
           (github.event_name == 'workflow_dispatch' && github.event.inputs.seeds != '')
           && github.event.inputs.seeds
-          || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]'
+          || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]'
           ) }}
     steps:
       - uses: actions/checkout@v4
