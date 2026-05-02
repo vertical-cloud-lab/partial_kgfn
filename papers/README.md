@@ -1,7 +1,15 @@
 # BOFN Literature
 
 This directory is the canonical reference list for papers underlying the BOFN / pKGFN codebase.
-PDFs are **not** committed here due to publisher copyright; use the links below to access each paper directly.
+Open-access PDFs (arXiv preprints and the PMLR CC-BY proceedings version) are committed under [`pdfs/`](./pdfs/) for offline reference; the original source URLs are listed below for each paper.
+
+| Paper | Local PDF | Source |
+|---|---|---|
+| Astudillo & Frazier 2021 (BOFN) | [pdfs/Astudillo_Frazier_2021_BOFN_NeurIPS_arXiv-2110.06410.pdf](./pdfs/Astudillo_Frazier_2021_BOFN_NeurIPS_arXiv-2110.06410.pdf) | [arXiv:2110.06410](https://arxiv.org/pdf/2110.06410) |
+| Buathong et al. 2024 (pKGFN, ICML) | [pdfs/Buathong_etal_2024_pKGFN_ICML_PMLR-CC-BY.pdf](./pdfs/Buathong_etal_2024_pKGFN_ICML_PMLR-CC-BY.pdf) | [PMLR v235 (CC-BY 4.0)](https://raw.githubusercontent.com/mlresearch/v235/main/assets/buathong24a/buathong24a.pdf) |
+| Buathong & Frazier 2025 (Fast pKGFN) | [pdfs/Buathong_Frazier_2025_FastpKGFN_AutoML_arXiv-2506.11456.pdf](./pdfs/Buathong_Frazier_2025_FastpKGFN_AutoML_arXiv-2506.11456.pdf) | [arXiv:2506.11456](https://arxiv.org/pdf/2506.11456) |
+| Frazier 2018 (BO tutorial) | [pdfs/Frazier_2018_BO_Tutorial_arXiv-1807.02811.pdf](./pdfs/Frazier_2018_BO_Tutorial_arXiv-1807.02811.pdf) | [arXiv:1807.02811](https://arxiv.org/pdf/1807.02811) |
+| Jones, Schonlau, Welch 1998 (EGO) | *not committed (paywalled, no preprint)* | [Springer DOI](https://doi.org/10.1023/A:1008306431147) |
 
 ---
 
