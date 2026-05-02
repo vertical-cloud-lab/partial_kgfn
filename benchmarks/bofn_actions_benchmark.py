@@ -34,6 +34,12 @@ SMOKE_BUDGET = 80.0
 
 
 def _network_values(x: np.ndarray) -> np.ndarray:
+    """Evaluate the synthetic 3-input, 4-node benchmark network.
+
+    The root nodes y0, y1, and y2 each depend on one design coordinate. The
+    final node y3 combines those root-node outputs and is the optimization
+    target tracked by all benchmark algorithms.
+    """
     y0 = math.sin(6.0 * x[0]) + 0.4 * math.cos(3.0 * x[0])
     y1 = math.cos(5.0 * x[1]) - 0.2 * (x[1] - 0.7) ** 2
     y2 = math.sin(4.0 * x[2] + 0.5) + 0.3 * x[2]
@@ -46,25 +52,18 @@ def _candidate_grid(n: int = 13) -> np.ndarray:
     return np.array(np.meshgrid(axis, axis, axis, indexing="ij")).reshape(3, -1).T
 
 
-def _halton(index: int, dim: int = 3) -> np.ndarray:
-    def radical_inverse(i: int, base: int) -> float:
-        value = 0.0
-        factor = 1.0 / base
-        while i > 0:
-            value += factor * (i % base)
-            i //= base
-            factor /= base
-        return value
+def _sobol(index: int, dim: int = 3) -> np.ndarray:
+    from scipy.stats import qmc
 
-    primes = (2, 3, 5)
-    return np.array([radical_inverse(index + 1, primes[d]) for d in range(dim)], dtype=float)
+    m = max(0, math.ceil(math.log2(index + 1)))
+    return qmc.Sobol(d=dim, scramble=False).random_base2(m)[index]
 
 
 def _select_candidate(algo: str, rng: np.random.Generator, step: int, observations: list[dict], grid: np.ndarray) -> np.ndarray:
     if algo == "Random":
         return rng.random(3)
     if algo == "Sobol":
-        return _halton(step)
+        return _sobol(step)
 
     values = np.array([_network_values(x) for x in grid])
     if algo == "LowFidOnly":
@@ -165,7 +164,7 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
         ax.plot(xs, np.nanmean(ys, axis=0), label=algo)
     ax.set_xlabel("Cumulative cost")
     ax.set_ylabel("Best final-node value")
-    ax.set_title("BOFN benchmark cost-efficiency smoke summary")
+    ax.set_title("BOFN benchmark cost-efficiency summary")
     ax.legend(loc="best", fontsize="small")
     fig.tight_layout()
     fig.savefig(out_dir / "cost_efficiency.png", dpi=150)
