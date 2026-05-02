@@ -165,3 +165,8 @@ cython_debug/
 # Benchmark outputs
 benchmarks/results/
 benchmarks/figures/
+# ...but keep the BOFN Actions benchmark figures and per-seed result JSONs
+!benchmarks/figures/actions/
+!benchmarks/figures/actions/**
+!benchmarks/results/actions/
+!benchmarks/results/actions/**
