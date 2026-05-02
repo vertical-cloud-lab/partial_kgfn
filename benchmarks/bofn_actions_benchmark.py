@@ -8,17 +8,15 @@ import csv
 import json
 import math
 import os
-import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from partial_kgfn.models.dag import DAG
-
 ALGOS = ["Random", "Sobol", "LowFidOnly", "Node2Only", "HighFidOnly", "TSFN", "pKGFN"]
+# Synthetic 4-node DAG: nodes 0/1/2 are roots, node 3 depends on [0, 1, 2].
+BENCHMARK_PARENT_NODES = [[], [], [], [0, 1, 2]]
+BENCHMARK_ROOT_NODES = [k for k, parents in enumerate(BENCHMARK_PARENT_NODES) if not parents]
 DEFAULT_NODE_COST = 40.0
 FULL_GRID_SIZE = 13
 SMOKE_GRID_SIZE = 7
@@ -106,7 +104,7 @@ def run_benchmark(algo: str, seed: int, budget: float | None = None) -> dict:
     if algo not in ALGOS:
         raise ValueError(f"Unsupported algorithm: {algo}. Expected one of {', '.join(ALGOS)}")
 
-    benchmark_dag = DAG(parent_nodes=[[], [], [], [0, 1, 2]])
+    benchmark_dag_root_nodes = list(BENCHMARK_ROOT_NODES)
     rng = np.random.default_rng(seed)
     grid = _candidate_grid(SMOKE_GRID_SIZE if os.getenv("SMOKE_TEST") else FULL_GRID_SIZE)
     total_budget = budget if budget is not None else (SMOKE_BUDGET if os.getenv("SMOKE_TEST") else DEFAULT_BUDGET)
@@ -138,7 +136,7 @@ def run_benchmark(algo: str, seed: int, budget: float | None = None) -> dict:
         "budget": total_budget,
         "total_cost": spent,
         "node_cost": step_cost,
-        "root_nodes": benchmark_dag.get_root_nodes(),
+        "root_nodes": benchmark_dag_root_nodes,
         "best_value": best_value,
         "observations": observations,
     }
