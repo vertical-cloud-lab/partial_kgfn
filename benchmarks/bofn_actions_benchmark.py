@@ -42,11 +42,13 @@ CLI usage
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -100,21 +102,50 @@ def _run_trial_subprocess(
     )
     env = dict(os.environ)
     env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    # Force unbuffered Python output in the child so per-iteration prints
+    # from `run_one_trial` appear live in the GitHub Actions log instead of
+    # waiting for the subprocess to exit.
+    env["PYTHONUNBUFFERED"] = "1"
+    prefix = f"[{algo} seed={seed}] "
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", code],
+        cwd=str(REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    tail: collections.deque[str] = collections.deque(maxlen=20)
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
     try:
-        completed = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=str(REPO_ROOT),
-            env=env,
-            timeout=timeout_seconds,
-            capture_output=True,
-            text=True,
-        )
-        ok = completed.returncode == 0
-        tail = (completed.stderr or "").splitlines()[-20:]
-        return ok, "\n".join(tail)
-    except subprocess.TimeoutExpired as exc:
-        tail = (exc.stderr or "").splitlines()[-20:] if exc.stderr else []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            tail.append(line)
+            # Stream live to the parent's stdout so GitHub Actions shows it.
+            print(prefix + line, flush=True)
+            if time.monotonic() > deadline:
+                timed_out = True
+                proc.kill()
+                break
+        proc.wait(timeout=max(1, int(deadline - time.monotonic())) if not timed_out else 30)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+    if timed_out:
         return False, f"subprocess timeout after {timeout_seconds}s\n" + "\n".join(tail)
+    ok = proc.returncode == 0
+    return ok, "\n".join(tail)
 
 
 def _load_checkpoint(algo: str, seed: int) -> dict | None:
