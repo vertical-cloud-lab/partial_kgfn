@@ -11,6 +11,7 @@ import os
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,7 +19,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from partial_kgfn.models.dag import DAG
 
 ALGOS = ["Random", "Sobol", "LowFidOnly", "Node2Only", "HighFidOnly", "TSFN", "pKGFN"]
-NODE_COSTS = {"LowFidOnly": 5.0, "Node2Only": 10.0, "HighFidOnly": 40.0, "Random": 40.0, "Sobol": 40.0, "TSFN": 40.0, "pKGFN": 40.0}
+DEFAULT_NODE_COST = 40.0
+NODE_COSTS = {
+    "LowFidOnly": 5.0,
+    "Node2Only": 10.0,
+    "HighFidOnly": DEFAULT_NODE_COST,
+    "Random": DEFAULT_NODE_COST,
+    "Sobol": DEFAULT_NODE_COST,
+    "TSFN": DEFAULT_NODE_COST,
+    "pKGFN": DEFAULT_NODE_COST,
+}
 DEFAULT_BUDGET = 400.0
 SMOKE_BUDGET = 80.0
 
@@ -84,7 +94,7 @@ def run_benchmark(algo: str, seed: int, budget: float | None = None) -> dict:
     if algo not in ALGOS:
         raise ValueError(f"Unsupported algorithm: {algo}. Expected one of {', '.join(ALGOS)}")
 
-    DAG(parent_nodes=[[], [], [], [0, 1, 2]])
+    benchmark_dag = DAG(parent_nodes=[[], [], [], [0, 1, 2]])
     rng = np.random.default_rng(seed)
     grid = _candidate_grid(7 if os.getenv("SMOKE_TEST") else 13)
     total_budget = budget if budget is not None else (SMOKE_BUDGET if os.getenv("SMOKE_TEST") else DEFAULT_BUDGET)
@@ -116,6 +126,7 @@ def run_benchmark(algo: str, seed: int, budget: float | None = None) -> dict:
         "budget": total_budget,
         "total_cost": spent,
         "node_cost": step_cost,
+        "root_nodes": benchmark_dag.get_root_nodes(),
         "best_value": best_value,
         "observations": observations,
     }
@@ -140,8 +151,6 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
         writer.writeheader()
         for result in results:
             writer.writerow({key: result[key] for key in ["algo", "seed", "total_cost", "best_value"]})
-
-    import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for algo in sorted({result["algo"] for result in results}):
