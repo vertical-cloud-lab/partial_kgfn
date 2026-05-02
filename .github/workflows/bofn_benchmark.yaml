@@ -13,11 +13,19 @@ name: BOFN benchmark
 #   3. combine     — merge all per-(algo,seed) JSONs into a composite
 #                    cost-efficiency plot + summary CSV.
 #
-# Triggered manually via workflow_dispatch only, so new commits do not
-# cancel or queue additional benchmark runs. Manual dispatch supports
-# shorter ``seeds`` and ``algos`` overrides for debugging.
+# Triggered on push to the listed paths and via manual workflow_dispatch.
+# The concurrency group below uses ``cancel-in-progress: false`` so push
+# events from new commits queue behind any in-flight run rather than
+# cancelling it. Manual dispatch supports shorter ``seeds`` and ``algos``
+# overrides for debugging.
 
 on:
+  push:
+    paths:
+      - 'benchmarks/bofn_actions_benchmark.py'
+      - 'partial_kgfn/**'
+      - '.github/workflows/bofn_benchmark.yaml'
+      - 'requirements.txt'
   workflow_dispatch:
     inputs:
       seeds:
