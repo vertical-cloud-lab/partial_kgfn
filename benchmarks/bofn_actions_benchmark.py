@@ -20,6 +20,14 @@ from partial_kgfn.models.dag import DAG
 
 ALGOS = ["Random", "Sobol", "LowFidOnly", "Node2Only", "HighFidOnly", "TSFN", "pKGFN"]
 DEFAULT_NODE_COST = 40.0
+FULL_GRID_SIZE = 13
+SMOKE_GRID_SIZE = 7
+# TSFN samples a noisy final-node score; the scale decays by step and the floor
+# keeps later Thompson-style proposals from becoming fully deterministic.
+TSFN_NOISE_FLOOR = 0.05
+TSFN_NOISE_SCALE = 0.35
+# pKGFN adds a small distance bonus to favor candidates away from prior probes.
+PKGFN_EXPLORATION_WEIGHT = 0.2
 NODE_COSTS = {
     "LowFidOnly": 5.0,
     "Node2Only": 10.0,
@@ -37,8 +45,9 @@ def _network_values(x: np.ndarray) -> np.ndarray:
     """Evaluate the synthetic 3-input, 4-node benchmark network.
 
     The root nodes y0, y1, and y2 each depend on one design coordinate. The
-    final node y3 combines those root-node outputs and is the optimization
-    target tracked by all benchmark algorithms.
+    coefficients create a bounded multimodal landscape with different root-node
+    frequencies and scales, while y3 is the final optimization target that
+    combines root-node outputs with a small disagreement penalty.
     """
     y0 = math.sin(6.0 * x[0]) + 0.4 * math.cos(3.0 * x[0])
     y1 = math.cos(5.0 * x[1]) - 0.2 * (x[1] - 0.7) ** 2
@@ -73,7 +82,11 @@ def _select_candidate(algo: str, rng: np.random.Generator, step: int, observatio
     elif algo == "HighFidOnly":
         score = values[:, 3]
     elif algo == "TSFN":
-        noise = rng.normal(0.0, max(0.05, 0.35 / math.sqrt(step + 1)), size=len(grid))
+        noise = rng.normal(
+            0.0,
+            max(TSFN_NOISE_FLOOR, TSFN_NOISE_SCALE / math.sqrt(step + 1)),
+            size=len(grid),
+        )
         score = values[:, 3] + noise
     elif algo == "pKGFN":
         explored = np.array([obs["x"] for obs in observations], dtype=float) if observations else np.empty((0, 3))
@@ -81,7 +94,7 @@ def _select_candidate(algo: str, rng: np.random.Generator, step: int, observatio
             distances = np.linalg.norm(grid[:, None, :] - explored[None, :, :], axis=-1).min(axis=1)
         else:
             distances = np.ones(len(grid))
-        score = values[:, 3] + 0.2 * distances / NODE_COSTS[algo]
+        score = values[:, 3] + PKGFN_EXPLORATION_WEIGHT * distances / NODE_COSTS[algo]
     else:
         raise ValueError(f"Unsupported algorithm: {algo}")
 
@@ -95,7 +108,7 @@ def run_benchmark(algo: str, seed: int, budget: float | None = None) -> dict:
 
     benchmark_dag = DAG(parent_nodes=[[], [], [], [0, 1, 2]])
     rng = np.random.default_rng(seed)
-    grid = _candidate_grid(7 if os.getenv("SMOKE_TEST") else 13)
+    grid = _candidate_grid(SMOKE_GRID_SIZE if os.getenv("SMOKE_TEST") else FULL_GRID_SIZE)
     total_budget = budget if budget is not None else (SMOKE_BUDGET if os.getenv("SMOKE_TEST") else DEFAULT_BUDGET)
     step_cost = NODE_COSTS[algo]
     observations: list[dict] = []
