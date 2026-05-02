@@ -7,10 +7,20 @@ Full extracted plain text: `papers/extracted/Buathong_etal_2024_pKGFN.txt`.
 
 ## TL;DR
 
-The CI workflow in this PR runs a **synthetic smoke harness**, not the
-paper's experiments. Quantitatively the numbers cannot be compared. To
-match the paper's experimental protocol the matrix has been bumped from
-**20 → 30 seeds** (the paper reports 30 replications).
+The CI workflow in this PR runs the **paper's actual `partial_kgfn`
+pipeline** (this fork includes the upstream `partial_kgfn/` package
+unchanged). Each (algo, seed) cell calls
+`partial_kgfn.experiments.ackleyS_runner.main(...)`, which invokes
+`run_one_trial(...)` with the paper's exact arguments (Ackley function
+network, `costs="1_49"`, `n_init=2*dim+1`, `noisy=True`, paper's seven
+algorithms). The harness (`benchmarks/bofn_actions_benchmark.py`) is a
+thin wrapper that runs each trial in a subprocess with a wall-clock
+timeout slightly under the GitHub Actions job timeout, then reads the
+per-iteration `.pt` checkpoint that `run_one_trial` writes after every BO
+iteration (`partial_kgfn/run_one_trial.py:588`) and emits a JSON. Even on
+subprocess timeout/OOM the latest checkpoint is captured, marked
+`complete: false`, and uploaded as an artifact, so `combine-results` can
+plot an early-budget-cutoff comparison from the survivors.
 
 ## Paper experimental setup (as written in §6)
 
@@ -58,32 +68,38 @@ cost_problem = {
 
 ## How to reproduce the paper's experiments
 
-The CI harness in this PR (`benchmarks/bofn_actions_benchmark.py`) does
-**not** reproduce the paper. To reproduce paper results:
+The CI harness in this PR (`benchmarks/bofn_actions_benchmark.py`)
+already drives the paper's pipeline on the AckleyS problem at the
+paper's exact settings — see the `BOFN benchmark` GitHub Actions
+workflow. To reproduce on the other paper problems (Manu-GP, FreeSolv,
+Pharma) locally:
 
 1. Clone the original code: https://github.com/frazier-lab/partial_kgfn
    (this repo is a fork; the same scripts live under `partial_kgfn/`).
 2. Build the conda environment: `conda env create -f pKGFN_env.yml`
-   then `conda activate pKGFN`.
+   then `conda activate pKGFN`. (The CI runner uses the pinned
+   `requirements.txt` instead.)
 3. Run experiments via `run_experiment.ipynb` (top-level), choosing the
    `algo`, `problem`, `cost_config`, and `trial` (1–30) per cell.
-   Each run writes JSON/pickle results to a per-(algo, problem, cost)
-   directory.
-4. Aggregate and plot with `Visualization/read_results_and_plot_graphs.ipynb`,
-   which calls `read_result(...)` over the 30-trial directories and
-   reproduces Figures 4–5 of the paper.
+   Each run writes a per-iteration `trial_<n>.pt` checkpoint to a
+   per-(algo, problem, cost) directory under `./results/`.
+4. Aggregate and plot with
+   `Visualization/read_results_and_plot_graphs.ipynb`, which calls
+   `read_result(...)` over the 30-trial directories and reproduces
+   Figures 4–5 of the paper.
 
-## CI smoke harness vs. paper — what differs
+## CI harness vs. paper — what matches and what differs
 
-| Aspect      | Paper (Buathong et al. 2024)                    | This PR's CI harness                              |
-|-------------|-------------------------------------------------|---------------------------------------------------|
-| Test fn     | Ackley6D / Manu-GP / FreeSolv / Pharma          | Custom 4-node trig DAG (3 roots → 1 sink)         |
-| Models      | GP surrogates per node (BoTorch)                | None — argmax of true value over a 13³ grid       |
-| Acquisition | p-KGFN / KGFN / EIFN / TSFN / EI / KG           | Oracle argmax stand-ins (pKGFN ≈ HighFidOnly)     |
-| Budget      | 700 cost units                                  | 400 cost units (smoke: smaller)                   |
-| Costs       | Problem-specific (see table above)              | 5 / 10 / 40 per node (CI-tractable)               |
-| Replicates  | **30**                                          | **30** (was 20; bumped to match)                  |
-| Output      | Figs 4–5: mean ±2 SE vs cost                    | `summary.csv` + cost_efficiency / boxplot PNGs    |
+| Aspect       | Paper (Buathong et al. 2024)                     | This PR's CI harness                                                                            |
+|--------------|--------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| Test fn      | Ackley6D / Manu-GP / FreeSolv / Pharma           | **Ackley6D** (paper's `AckleyFunctionNetwork`, `costs="1_49"`)                                  |
+| Models       | GP surrogates per node (BoTorch)                 | **Same** — the paper's `partial_kgfn.models.decoupled_gp_network.GaussianProcessNetwork`        |
+| Acquisition  | p-KGFN / KGFN / EIFN / TSFN / EI / KG / Random   | **Same seven** — the paper's `run_one_trial(...)` dispatch                                      |
+| Budget       | 700 cost units                                   | **700** (default; configurable via `PKGFN_BUDGET` env)                                          |
+| Costs        | Problem-specific (see table above)               | **1_49** (paper's headline AckleyS cost split)                                                  |
+| Replicates   | 30                                               | **30** (matrix seeds 1..30)                                                                     |
+| Output       | Figs 4–5: mean ±2 SE vs cost                     | `summary.csv`, full cost-efficiency PNG, **early-budget-cutoff** comparison PNG, final boxplot  |
+| Checkpointing | per-iteration `trial_<n>.pt`                    | **Same** `.pt`, plus a JSON re-emitted from the latest checkpoint even on CI timeout            |
 
 ## Paper headline results (Fig. 4, qualitative ranking at budget=700)
 
@@ -95,14 +111,25 @@ the ordering at full budget is:
 - **FreeSolv:** p-KGFN reaches the best hydration-energy minimum first.
 - **Pharma:** p-KGFN wins; baselines flatten earlier.
 
-Because this PR's harness uses oracle argmax stand-ins (no GP, no
-acquisition), `pKGFN` ≈ `HighFidOnly` ≈ true grid-optimum value of
-~1.4425, with `Random` ≈ 0.91 and `Sobol` ≈ 0.84. The qualitative
-"network-aware ≥ random/quasi-random" ordering matches the paper, but
-the *gap structure* between p-KGFN and the other GP-based baselines
-that the paper documents cannot appear here — that's the contribution
-of the actual acquisition function on a real GP, which the smoke
-harness does not implement.
+The CI workflow in this PR targets only the **Ackley (1_49)** row of
+that table; the qualitative ranking of `pKGFN ≳ EIFN > KGFN ≈ TSFN > EI
+≈ KG > Random` is what should reproduce when the matrix completes (or as
+much of it as fits in the 6h-per-cell timeout — the more expensive
+fantasy-based acquisitions will have shorter trajectories, which is why
+the early-budget-cutoff plot exists).
+
+## Caveats around CI timeouts
+
+`KGFN`, `EIFN`, and especially `pKGFN` are computationally heavy: in the
+paper a single Ackley `pKGFN` trial at budget=700 can take many CPU
+hours. GitHub Actions caps each cell at 6 h, so some cells in the matrix
+will hit the inner-subprocess wall-clock cap (`PKGFN_TIMEOUT_SECONDS`,
+default 5h30m) before reaching the full budget. The wrapper still emits
+a JSON from the latest `.pt` checkpoint and uploads both, marked
+`complete: false`. The `combine` step then plots an
+*early-budget-cutoff* comparison trimmed to the smallest completed cost
+across all runs, so the comparison stays fair without dropping
+incomplete cells.
 
 ## Token-frequency snapshot of the paper
 
