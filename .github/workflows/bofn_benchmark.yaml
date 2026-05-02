@@ -1,0 +1,148 @@
+name: BOFN benchmark
+
+# Runs benchmarks/bofn_actions_benchmark.py on GitHub Actions runners to
+# compare BOFN+pKGFN against standard baselines (Random, Sobol, LowFidOnly
+# = Node0Only $5, Node2Only $10, HighFidOnly full-network GP-EI, TSFN,
+# pKGFN) at matched cost budget. One single-node baseline is included for
+# each root node represented in this benchmark; middle nodes that depend on
+# parent outputs are not probed in isolation.
+#
+# Strategy:
+#   1. smoke-test  — quick SMOKE_TEST pass, catches wiring bugs.
+#   2. full-test   — matrix of (algo × seed), each a separate job, up to 6 h.
+#   3. combine     — merge all per-(algo,seed) JSONs into a composite
+#                    cost-efficiency plot + summary CSV.
+#
+# Manual dispatch supports shorter ``seeds`` and ``algos`` overrides for
+# debugging.
+
+on:
+  push:
+    paths:
+      - 'benchmarks/bofn_actions_benchmark.py'
+      - 'partial_kgfn/**'
+      - '.github/workflows/bofn_benchmark.yaml'
+      - 'requirements.txt'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: >-
+          JSON array of seeds to run (default: 20 seeds).
+          Example: "[0,1,2]" for a 3-seed debug run.
+        required: false
+        default: ''
+      algos:
+        description: >-
+          JSON array of algorithms to run (default: all seven).
+          Example: '["Random","pKGFN"]' for just two.
+        required: false
+        default: ''
+
+jobs:
+  smoke-test:
+    name: smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run smoke test
+        env:
+          SMOKE_TEST: '1'
+        run: |
+          python benchmarks/bofn_actions_benchmark.py --mode smoke
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-smoke-artifacts
+          path: |
+            benchmarks/results/actions_smoke/
+            benchmarks/figures/actions_smoke/
+          retention-days: 14
+
+  full-test:
+    name: full ${{ matrix.algo }}/seed${{ matrix.seed }}
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        algo: ${{ fromJSON((github.event_name == 'workflow_dispatch' && github.event.inputs.algos != '') && github.event.inputs.algos || '["Random","Sobol","LowFidOnly","Node2Only","HighFidOnly","TSFN","pKGFN"]') }}
+        seed: ${{ fromJSON((github.event_name == 'workflow_dispatch' && github.event.inputs.seeds != '') && github.event.inputs.seeds || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run single (algo, seed)
+        run: |
+          mkdir -p benchmarks/results/actions
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode run \
+            --algo ${{ matrix.algo }} \
+            --seed ${{ matrix.seed }} \
+            --out benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+      - name: Upload partial result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}
+          path: benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+          retention-days: 30
+
+  combine-results:
+    name: combine-results
+    needs: full-test
+    # Run combine only when full-test actually executed and produced artifacts.
+    # 'skipped' means smoke-test failed/was cancelled so no bofn-result-* exist;
+    # 'cancelled' means a user cancel. In both cases there is nothing to plot,
+    # so skip this job instead of failing with "No JSON results found ...".
+    # 'failure' still runs combine because fail-fast: false lets some cells
+    # fail while others succeed, and we want a partial plot of the survivors.
+    if: always() && (needs.full-test.result == 'success' || needs.full-test.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies (matplotlib + numpy only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==1.23.5 matplotlib==3.9.4
+      - name: Download all partial results
+        uses: actions/download-artifact@v4.1.3
+        with:
+          pattern: bofn-result-*
+          path: partial-results/
+          merge-multiple: true
+      - name: Combine and plot
+        run: |
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode combine \
+            --input-dir partial-results/ \
+            --out-dir benchmarks/figures/actions/
+      - name: Upload combined artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-combined-${{ github.run_id }}
+          path: |
+            benchmarks/figures/actions/
+            partial-results/
+          retention-days: 90
