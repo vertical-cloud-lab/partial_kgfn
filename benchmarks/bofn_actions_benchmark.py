@@ -95,11 +95,8 @@ def _run_trial_subprocess(
     """
     code = (
         "from partial_kgfn.experiments.ackleyS_runner import main\n"
-        # The runner internally overrides `noisy` to True (and the resulting
-        # checkpoint dir is therefore `AckSN_1_49`). We don't pass `noisy=...`
-        # so the call site honestly reflects the runner's contract.
         f"main(trial={int(seed)}, algo={algo!r}, costs={COSTS_KEY!r}, "
-        f"budget={int(budget)}, impose_assump=False)\n"
+        f"budget={int(budget)}, noisy=True, impose_assump=False)\n"
     )
     env = dict(os.environ)
     env.setdefault("PYTHONPATH", str(REPO_ROOT))
