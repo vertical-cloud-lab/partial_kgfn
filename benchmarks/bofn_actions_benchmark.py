@@ -11,14 +11,17 @@ Checkpointing
 -------------
 The paper's `run_one_trial` saves the full BO state (`trial_<seed>.pt`) at
 the bottom of every BO iteration (`partial_kgfn/run_one_trial.py:588`). We
-therefore run the trial in a subprocess with a wall-clock timeout slightly
-less than the GitHub Actions job timeout. If the subprocess is killed
-(timeout, OOM, OS signal, etc.), we still read the latest `.pt` checkpoint
-and emit a JSON containing every BO iteration that completed before the
-kill, marked `complete: false`. The `combine` step then plots both the full
-trajectories and an "early-budget cutoff" view trimmed to the smallest
-budget completed across all runs in each algorithm, so the comparison stays
-fair even when some cells time out.
+call ``ackleyS_runner.main`` directly in-process, with a soft wall-clock
+timeout enforced via ``signal.SIGALRM``. On timeout (or any other in-loop
+exception) we still read the latest `.pt` checkpoint and emit a JSON
+containing every BO iteration that completed before the interruption,
+marked `complete: false`. Even if the runner is hard-killed before our
+``finally`` block runs, the most recent checkpoint is still on disk and is
+uploaded by the workflow (we only lose the iteration that was in flight).
+The `combine` step then plots both the full trajectories and an
+"early-budget cutoff" view trimmed to the smallest budget completed across
+all runs in each algorithm, so the comparison stays fair even when some
+cells time out.
 
 Algorithms reproduced from the paper
 ------------------------------------
@@ -42,13 +45,12 @@ CLI usage
 from __future__ import annotations
 
 import argparse
-import collections
 import csv
 import json
 import os
-import subprocess
+import signal
 import sys
-import time
+import traceback
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -74,78 +76,81 @@ PROBLEM_RESULTS_DIRNAME = f"{PROBLEM_NAME}_1_49"
 DEFAULT_BUDGET = int(os.getenv("PKGFN_BUDGET", "700"))
 SMOKE_BUDGET = int(os.getenv("PKGFN_SMOKE_BUDGET", "60"))
 
-# Wall-clock budget per (algo, seed) subprocess. Set just under the job-level
+# Wall-clock budget per (algo, seed). Set just under the job-level
 # `timeout-minutes` so the wrapper has time to read the .pt checkpoint and
-# emit JSON before GitHub Actions hard-kills the runner.
-SUBPROC_TIMEOUT_SECONDS = int(os.getenv("PKGFN_TIMEOUT_SECONDS", str(330 * 60)))
+# emit JSON before GitHub Actions hard-kills the runner. Enforced in-process
+# via signal.SIGALRM.
+TRIAL_TIMEOUT_SECONDS = int(os.getenv("PKGFN_TIMEOUT_SECONDS", str(330 * 60)))
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run_trial_subprocess(
+class _TrialTimeout(Exception):
+    """Raised by the SIGALRM handler when the in-process trial exceeds its budget."""
+
+
+def _run_trial_inprocess(
     algo: str,
     seed: int,
     budget: int,
     timeout_seconds: int,
 ) -> tuple[bool, str]:
-    """Run one paper trial in a subprocess and return (completed, stderr_tail).
+    """Invoke the paper's runner directly and return (completed, error_tail).
 
-    The subprocess invokes ``partial_kgfn.experiments.ackleyS_runner.main``
-    with the paper's exact arguments. CWD is the repo root so that
-    ``run_one_trial`` writes ``./results/AckS_1_49/<algo>/trial_<seed>.pt``
-    (and resolves the FreeSolv CSV that the package imports at module load).
+    We import and call ``partial_kgfn.experiments.ackleyS_runner.main`` in
+    the current Python process. ``run_one_trial`` saves a fresh ``.pt``
+    checkpoint at the bottom of every BO iteration, so even if the timeout
+    fires (or the runner is hard-killed by Actions before our ``finally``
+    block runs) the most recent snapshot is still on disk -- only the
+    in-flight iteration is lost.
+
+    A ``signal.SIGALRM`` is used as a soft, in-process wall-clock timeout
+    (POSIX-only; GitHub Actions runners are Linux). On non-POSIX hosts the
+    timeout is best-effort and only the workflow-level job timeout applies.
     """
-    code = (
-        "from partial_kgfn.experiments.ackleyS_runner import main\n"
-        f"main(trial={int(seed)}, algo={algo!r}, costs={COSTS_KEY!r}, "
-        f"budget={int(budget)}, noisy=True, impose_assump=False)\n"
-    )
-    env = dict(os.environ)
-    env.setdefault("PYTHONPATH", str(REPO_ROOT))
-    # Force unbuffered Python output in the child so per-iteration prints
-    # from `run_one_trial` appear live in the GitHub Actions log instead of
-    # waiting for the subprocess to exit.
-    env["PYTHONUNBUFFERED"] = "1"
-    prefix = f"[{algo} seed={seed}] "
-    proc = subprocess.Popen(
-        [sys.executable, "-u", "-c", code],
-        cwd=str(REPO_ROOT),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    tail: collections.deque[str] = collections.deque(maxlen=20)
-    deadline = time.monotonic() + timeout_seconds
-    timed_out = False
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            tail.append(line)
-            # Stream live to the parent's stdout so GitHub Actions shows it.
-            print(prefix + line, flush=True)
-            if time.monotonic() > deadline:
-                timed_out = True
-                proc.kill()
-                break
-        proc.wait(timeout=max(1, int(deadline - time.monotonic())) if not timed_out else 30)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            pass
-    finally:
-        if proc.stdout is not None:
-            proc.stdout.close()
+    # Late import: keeps this module importable for `--mode combine` without
+    # the heavy `partial_kgfn`/torch dependency stack. Ensure the repo root
+    # is on ``sys.path`` so the in-tree package is importable when the
+    # harness is run without an editable install.
+    repo_root_str = str(REPO_ROOT)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+    from partial_kgfn.experiments.ackleyS_runner import main as ackleyS_main
 
-    if timed_out:
-        return False, f"subprocess timeout after {timeout_seconds}s\n" + "\n".join(tail)
-    ok = proc.returncode == 0
-    return ok, "\n".join(tail)
+    have_alarm = hasattr(signal, "SIGALRM")
+    prev_handler = None
+    if have_alarm:
+        def _alarm_handler(signum, frame):  # noqa: ARG001
+            raise _TrialTimeout(f"trial exceeded {timeout_seconds}s wall-clock budget")
+
+        prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(max(1, int(timeout_seconds)))
+
+    # `run_one_trial` writes ./results/AckSN_1_49/<algo>/trial_<seed>.pt
+    # relative to the current working directory, so chdir to the repo root
+    # for the duration of the call (and restore on exit).
+    prev_cwd = os.getcwd()
+    os.chdir(str(REPO_ROOT))
+    try:
+        ackleyS_main(
+            trial=int(seed),
+            algo=algo,
+            costs=COSTS_KEY,
+            budget=int(budget),
+            noisy=True,
+            impose_assump=False,
+        )
+        return True, ""
+    except _TrialTimeout as exc:
+        return False, f"{exc}"
+    except Exception:
+        return False, traceback.format_exc(limit=20)
+    finally:
+        if have_alarm:
+            signal.alarm(0)
+            if prev_handler is not None:
+                signal.signal(signal.SIGALRM, prev_handler)
+        os.chdir(prev_cwd)
 
 
 def _load_checkpoint(algo: str, seed: int) -> dict | None:
@@ -198,8 +203,8 @@ def run_benchmark(algo: str, seed: int, budget: int | None = None,
                   timeout_seconds: int | None = None) -> dict:
     """Run one (algo, seed) trial of the paper's pipeline; always return a dict.
 
-    On subprocess failure or timeout we still read the latest checkpoint and
-    return whatever progress was saved, with ``complete: false``.
+    On in-process timeout or any other exception we still read the latest
+    checkpoint and return whatever progress was saved, with ``complete: false``.
     """
     if algo not in PAPER_ALGOS:
         raise ValueError(
@@ -207,14 +212,14 @@ def run_benchmark(algo: str, seed: int, budget: int | None = None,
         )
     budget = int(budget if budget is not None else DEFAULT_BUDGET)
     timeout_seconds = int(
-        timeout_seconds if timeout_seconds is not None else SUBPROC_TIMEOUT_SECONDS
+        timeout_seconds if timeout_seconds is not None else TRIAL_TIMEOUT_SECONDS
     )
 
-    ok, stderr_tail = _run_trial_subprocess(algo, seed, budget, timeout_seconds)
+    ok, error_tail = _run_trial_inprocess(algo, seed, budget, timeout_seconds)
     ckpt = _load_checkpoint(algo, seed)
 
     if ckpt is None:
-        # No checkpoint at all (subprocess died before the first iteration).
+        # No checkpoint at all (the runner died before the first iteration).
         return {
             "algo": algo,
             "seed": seed,
@@ -222,8 +227,8 @@ def run_benchmark(algo: str, seed: int, budget: int | None = None,
             "costs": COSTS_KEY,
             "budget": budget,
             "complete": False,
-            "subprocess_ok": ok,
-            "subprocess_stderr_tail": stderr_tail,
+            "trial_ok": ok,
+            "trial_error_tail": error_tail,
             "cumulative_costs": [],
             "best_obs_vals": [],
             "best_post_means": [],
@@ -238,10 +243,10 @@ def run_benchmark(algo: str, seed: int, budget: int | None = None,
     final_best_obs = (
         float(ckpt["best_obs_vals"][-1]) if ckpt["best_obs_vals"] else None
     )
-    # `complete` reflects whether the paper's BO loop exited cleanly (i.e. the
-    # subprocess returned 0). The loop itself terminates when the remaining
-    # budget is below the cheapest available node cost, which can leave
-    # `final_cost` slightly under `budget`; that's still a complete run.
+    # `complete` reflects whether the paper's BO loop exited cleanly. The
+    # loop itself terminates when the remaining budget is below the cheapest
+    # available node cost, which can leave `final_cost` slightly under
+    # `budget`; that's still a complete run.
     complete = bool(ok)
 
     return {
@@ -251,8 +256,8 @@ def run_benchmark(algo: str, seed: int, budget: int | None = None,
         "costs": COSTS_KEY,
         "budget": budget,
         "complete": complete,
-        "subprocess_ok": ok,
-        "subprocess_stderr_tail": stderr_tail if not ok else "",
+        "trial_ok": ok,
+        "trial_error_tail": error_tail if not ok else "",
         "final_cost": final_cost,
         "final_best_obs_val": final_best_obs,
         **ckpt,
@@ -300,7 +305,7 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
     # ---- summary.csv ---------------------------------------------------
     summary_path = out_dir / "summary.csv"
     fieldnames = [
-        "algo", "seed", "complete", "subprocess_ok", "n_iterations_completed",
+        "algo", "seed", "complete", "trial_ok", "n_iterations_completed",
         "final_cost", "final_best_obs_val", "budget",
     ]
     with summary_path.open("w", newline="", encoding="utf-8") as handle:
@@ -393,7 +398,7 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
 def run_smoke() -> None:
     result_dir = Path("benchmarks/results/actions_smoke")
     figure_dir = Path("benchmarks/figures/actions_smoke")
-    # Use a short subprocess timeout for smoke so a wedged import surfaces fast.
+    # Use a short timeout for smoke so a wedged import surfaces fast.
     smoke_timeout = int(os.getenv("PKGFN_SMOKE_TIMEOUT_SECONDS", "1500"))
     for algo in SMOKE_ALGOS:
         result = run_benchmark(

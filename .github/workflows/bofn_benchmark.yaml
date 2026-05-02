@@ -6,7 +6,7 @@ name: BOFN benchmark
 # cell calls partial_kgfn.experiments.ackleyS_runner.main with the paper's
 # exact arguments (no oracle stand-ins, no fallbacks), and the wrapper reads
 # the per-iteration .pt checkpoint that run_one_trial writes after every BO
-# iteration so partial results survive subprocess timeouts on the 6h runner.
+# iteration so partial results survive in-process timeouts on the 6h runner.
 #
 # Algorithms (paper's seven, Sec. 5):
 #   Random, EI, KG, KGFN, EIFN, TSFN, pKGFN
@@ -121,9 +121,10 @@ jobs:
           pip install -r requirements.txt
       - name: Run single full-mode (algo, seed)
         env:
-          # Cap the inner subprocess just under the job timeout so the wrapper
-          # has time to read the .pt checkpoint and emit JSON before the runner
-          # is hard-killed by GitHub Actions.
+          # Cap the in-process trial just under the job timeout so the
+          # SIGALRM-based soft timeout interrupts the BO loop in time to
+          # read the .pt checkpoint and emit JSON before the runner is
+          # hard-killed by GitHub Actions.
           PKGFN_TIMEOUT_SECONDS: '3000'
         run: |
           mkdir -p benchmarks/results/actions_full_smoke
@@ -173,10 +174,12 @@ jobs:
       - name: Run single (algo, seed)
         env:
           # 5h 30m: leaves ~30m at the end of the 6h job for the JSON-emit
-          # path that runs *after* the subprocess is killed, so even a
-          # timed-out cell still uploads a partial JSON + the latest .pt
-          # checkpoint that run_one_trial wrote at the bottom of every BO
-          # iteration.
+          # path that runs *after* the SIGALRM-based soft timeout fires, so
+          # even a timed-out cell still uploads a partial JSON + the latest
+          # .pt checkpoint that run_one_trial wrote at the bottom of every
+          # BO iteration. Even if the job is hard-killed before the JSON is
+          # written, the .pt checkpoint is still on disk and uploaded by
+          # the `if: always()` step below.
           PKGFN_TIMEOUT_SECONDS: '19800'
         run: |
           mkdir -p benchmarks/results/actions
