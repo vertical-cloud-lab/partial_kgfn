@@ -323,7 +323,21 @@ def run_one_trial(
         count = torch.zeros(len(problem.parent_nodes), dtype=int)
     print("==========================================================================")
     gen_x_fantasies_count = 0
+    # Optional smoke-gate: cap the number of completed BO iterations so a CI
+    # job can verify the loop runs end-to-end without burning the full budget.
+    # Value is the number of BO iterations after the initial design; <=0 or
+    # unset means "no cap, run to budget" (the paper's default behaviour).
+    try:
+        _max_iters_env = int(os.environ.get("PKGFN_MAX_ITERATIONS", "0"))
+    except ValueError:
+        _max_iters_env = 0
+    _completed_bo_iters = 0
     while total_cost < budget:
+        if _max_iters_env > 0 and _completed_bo_iters >= _max_iters_env:
+            logger.info(
+                f"PKGFN_MAX_ITERATIONS={_max_iters_env} reached; stopping BO loop."
+            )
+            break
         remaining_budget = budget - total_cost
         logger.info(f"Remaining budget: {remaining_budget}")
         t0 = time.time()
@@ -584,9 +598,11 @@ def run_one_trial(
                 "random": random.getstate(),
             },
         }
-        BO_model = {"model": model}
         torch.save(BO_results, results_dir + f"trial_{trial}.pt")
-        torch.save(BO_model, results_dir + f"model_trial_{trial}.pt")  # dill
+        # Note: we deliberately do NOT save the BoTorch model weights. The
+        # GP is cheap to refit from `train_X`/`train_Y` on resume, and the
+        # resume path above only reads `trial_<seed>.pt`.
+        _completed_bo_iters += 1
 
 
 def get_suggested_node_and_input(

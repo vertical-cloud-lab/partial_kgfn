@@ -14,9 +14,10 @@ name: BOFN benchmark
 # Strategy:
 #   1. smoke-test  — quick SMOKE_TEST pass over Random+EI at small budget,
 #                    catches import/wiring bugs.
-#   2. full-smoke  — 1-2 cells of the *full* (paper-budget) pipeline. Catches
-#                    bugs that only show up at full budget before fanning the
-#                    expensive 7×30 matrix out to 210 jobs.
+#   2. full-smoke  — a single full-budget pKGFN iteration (PKGFN_MAX_ITERATIONS=1).
+#                    Catches bugs that only show up at the paper budget and on
+#                    pKGFN-specific code paths before fanning the expensive
+#                    7×30 matrix out to 210 jobs.
 #   3. full-test   — matrix of (algo × seed), each a separate job, up to 6 h.
 #                    Each cell uploads its JSON + the latest .pt checkpoint
 #                    even on timeout (`if: always()`), so the combine step
@@ -97,16 +98,17 @@ jobs:
     name: full-smoke ${{ matrix.algo }}/seed${{ matrix.seed }}
     needs: smoke-test
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Run a couple of *full-mode* cells (no SMOKE_TEST env, real budget) before
-    # fanning out the 7×30 matrix. Catches bugs that only appear at the full
-    # paper budget without burning hours on 210 jobs.
+    timeout-minutes: 30
+    # Run a *single pKGFN iteration* end-to-end (full paper budget configured,
+    # but `PKGFN_MAX_ITERATIONS=1` stops the BO loop after the first completed
+    # iteration). Catches bugs that only appear at the full paper budget --
+    # e.g. fantasy/acqf wiring on the cost-49 node -- without burning hours
+    # before fanning out the 7×30 matrix. If this errors the rest of the run
+    # is gated off (the full-test job depends on full-smoke).
     strategy:
       fail-fast: true
       matrix:
         include:
-          - algo: Random
-            seed: 1
           - algo: pKGFN
             seed: 1
     steps:
@@ -119,13 +121,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run single full-mode (algo, seed)
+      - name: Run single pKGFN iteration (smoke gate)
         env:
-          # Cap the in-process trial just under the job timeout so the
-          # SIGALRM-based soft timeout interrupts the BO loop in time to
-          # read the .pt checkpoint and emit JSON before the runner is
-          # hard-killed by GitHub Actions.
-          PKGFN_TIMEOUT_SECONDS: '3000'
+          # Cap the BO loop at one completed post-init iteration. The init
+          # design + one pKGFN iter take ~6 minutes on the runner per the
+          # prior 9-iter run (~340 s/iter, init <30 s); 1500 s leaves ample
+          # margin and is well under the job timeout, so SIGALRM has time to
+          # surface a clean failure instead of a hard-kill.
+          PKGFN_TIMEOUT_SECONDS: '1500'
+          PKGFN_MAX_ITERATIONS: '1'
         run: |
           mkdir -p benchmarks/results/actions_full_smoke
           python benchmarks/bofn_actions_benchmark.py \
