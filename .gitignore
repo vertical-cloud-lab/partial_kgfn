@@ -168,5 +168,7 @@ benchmarks/figures/
 # ...but keep the BOFN Actions benchmark figures and per-seed result JSONs
 !benchmarks/figures/actions/
 !benchmarks/figures/actions/**
+!benchmarks/figures/dags/
+!benchmarks/figures/dags/**
 !benchmarks/results/actions/
 !benchmarks/results/actions/**
