@@ -12,7 +12,7 @@ name: BOFN benchmark
 #   Random, EI, KG, KGFN, EIFN, TSFN, pKGFN
 #
 # Strategy:
-#   1. smoke-test  — quick SMOKE_TEST pass over Random+EI at small budget,
+#   1. smoke-test  — quick `--mode smoke` pass over Random+EI at small budget,
 #                    catches import/wiring bugs.
 #   2. full-smoke  — a single full-budget pKGFN iteration (PKGFN_MAX_ITERATIONS=1).
 #                    Catches bugs that only show up at the paper budget and on
@@ -80,8 +80,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Run smoke test
-        env:
-          SMOKE_TEST: '1'
         run: |
           python benchmarks/bofn_actions_benchmark.py --mode smoke
       - name: Upload smoke artifacts

@@ -8,19 +8,23 @@ Full extracted plain text: `papers/extracted/Buathong_etal_2024_pKGFN.txt`.
 ## TL;DR
 
 The CI workflow in this PR runs the **paper's actual `partial_kgfn`
-pipeline** (this fork includes the upstream `partial_kgfn/` package
-unchanged). Each (algo, seed) cell calls
+pipeline**. Each (algo, seed) cell calls
 `partial_kgfn.experiments.ackleyS_runner.main(...)`, which invokes
 `run_one_trial(...)` with the paper's exact arguments (Ackley function
 network, `costs="1_49"`, `n_init=2*dim+1`, `noisy=True`, paper's seven
 algorithms). The harness (`benchmarks/bofn_actions_benchmark.py`) is a
-thin wrapper that runs each trial in a subprocess with a wall-clock
-timeout slightly under the GitHub Actions job timeout, then reads the
-per-iteration `.pt` checkpoint that `run_one_trial` writes after every BO
-iteration (`partial_kgfn/run_one_trial.py:588`) and emits a JSON. Even on
-subprocess timeout/OOM the latest checkpoint is captured, marked
+thin wrapper that runs each trial **in the same Python process** with a
+soft wall-clock timeout enforced via ``signal.SIGALRM`` (slightly under
+the GitHub Actions job timeout), then reads the per-iteration `.pt`
+checkpoint that `run_one_trial` writes after every BO iteration (the
+``torch.save(BO_results, ... trial_<seed>.pt)`` call) and emits a JSON.
+Even on timeout/OOM the latest checkpoint is captured, marked
 `complete: false`, and uploaded as an artifact, so `combine-results` can
-plot an early-budget-cutoff comparison from the survivors.
+plot an early-budget-cutoff comparison from the survivors. This PR also
+makes two small upstream tweaks to `partial_kgfn/run_one_trial.py`: it
+drops the unused `model_trial_<seed>.pt` save and adds an opt-in
+`PKGFN_MAX_ITERATIONS` env-var gate (default 0 = paper behaviour) so the
+`full-smoke` job can exercise one real pKGFN iteration end-to-end.
 
 ## Paper experimental setup (as written in §6)
 

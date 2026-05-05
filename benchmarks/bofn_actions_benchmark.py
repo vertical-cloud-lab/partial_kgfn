@@ -10,7 +10,8 @@ figures, with no oracle stand-ins, fallbacks, or shortcuts.
 Checkpointing
 -------------
 The paper's `run_one_trial` saves the full BO state (`trial_<seed>.pt`) at
-the bottom of every BO iteration (`partial_kgfn/run_one_trial.py:588`). We
+the bottom of every BO iteration (see the ``torch.save(BO_results, ...
+trial_<seed>.pt)`` call in ``partial_kgfn/run_one_trial.py``). We
 call ``ackleyS_runner.main`` directly in-process, with a soft wall-clock
 timeout enforced via ``signal.SIGALRM``. On timeout (or any other in-loop
 exception) we still read the latest `.pt` checkpoint and emit a JSON
@@ -31,7 +32,7 @@ Algorithms reproduced from the paper
 CLI usage
 ---------
     # Quick smoke (small budget, fast algos only)
-    SMOKE_TEST=1 python benchmarks/bofn_actions_benchmark.py --mode smoke
+    python benchmarks/bofn_actions_benchmark.py --mode smoke
 
     # One full-mode (algo, seed) cell, writing JSON for the combiner
     python benchmarks/bofn_actions_benchmark.py --mode run \\
@@ -195,7 +196,10 @@ def _load_checkpoint(algo: str, seed: int) -> dict | None:
         "best_post_means": best_post_means,
         "obj_at_best_designs": obj_at_best_designs,
         "runtimes": runtimes,
-        "n_iterations_completed": len(best_obs_vals),
+        # `best_obs_vals` includes the initial-design snapshot at index 0
+        # (see ``best_obs_vals = [best_obs_val]`` in run_one_trial), so the
+        # number of *completed BO iterations* is one less than its length.
+        "n_iterations_completed": max(0, len(best_obs_vals) - 1),
     }
 
 
@@ -341,16 +345,20 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
     fig.savefig(out_dir / "cost_efficiency.png", dpi=150)
     plt.close(fig)
 
-    # ---- early-cutoff plot: trim to the smallest completed cost across runs
-    # so partial / timed-out runs don't bias the right edge.
+    # ---- early-cutoff plot: trim to the smallest *completed* run's final
+    # cost so partial / timed-out runs don't bias the right edge. We only
+    # consider runs whose BO loop reached the budget (``complete: true``).
     cutoff_per_algo = {
         algo: min(
             float(r["cumulative_costs"][-1])
             for r in results
-            if r["algo"] == algo and r.get("cumulative_costs")
+            if r["algo"] == algo and r.get("complete") and r.get("cumulative_costs")
         )
         for algo in algos
-        if any(r["algo"] == algo and r.get("cumulative_costs") for r in results)
+        if any(
+            r["algo"] == algo and r.get("complete") and r.get("cumulative_costs")
+            for r in results
+        )
     }
     global_cutoff = min(cutoff_per_algo.values()) if cutoff_per_algo else 0.0
 
