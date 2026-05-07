@@ -459,6 +459,8 @@ jobs:
               cost = float(data.get("final_cost") or 0.0)
               key = (algo, int(seed))
               prev = chosen.get(key)
+              # Tuple comparison: higher final_cost wins; on a tie, the
+              # higher chain number wins (newer run with same progress).
               if prev is None or (cost, chain) > (prev[0], prev[1]):
                   chosen[key] = (cost, chain, p)
 
