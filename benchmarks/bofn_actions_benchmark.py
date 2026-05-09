@@ -332,10 +332,15 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
         xs = np.linspace(0.0, max_cost, 200)
         traj = np.vstack([_trajectory_step(r, xs) for r in runs])
         n_complete = sum(1 for r in runs if r.get("complete"))
-        ax.plot(xs, np.nanmean(traj, axis=0),
-                label=f"{algo} (n={len(runs)}, complete={n_complete})")
+        mean = np.nanmean(traj, axis=0)
+        n_eff = np.sum(~np.isnan(traj), axis=0)
+        sem = np.nanstd(traj, axis=0, ddof=1) / np.sqrt(np.maximum(n_eff, 1))
+        line, = ax.plot(xs, mean,
+                        label=f"{algo} (n={len(runs)}, complete={n_complete})")
+        ax.fill_between(xs, mean - sem, mean + sem,
+                        color=line.get_color(), alpha=0.2, linewidth=0)
     ax.set_xlabel("Cumulative cost")
-    ax.set_ylabel("Best observed value (mean over seeds)")
+    ax.set_ylabel("Best observed value (mean ± 1 SE over seeds)")
     ax.set_title(
         "BOFN cost-efficiency on AckleyS (paper pKGFN pipeline)\n"
         "extends each run to its own final cost; partial runs included"
@@ -369,9 +374,14 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
             continue
         xs = np.linspace(0.0, global_cutoff, 200)
         traj = np.vstack([_trajectory_step(r, xs) for r in runs])
-        ax.plot(xs, np.nanmean(traj, axis=0), label=f"{algo} (n={len(runs)})")
+        mean = np.nanmean(traj, axis=0)
+        n_eff = np.sum(~np.isnan(traj), axis=0)
+        sem = np.nanstd(traj, axis=0, ddof=1) / np.sqrt(np.maximum(n_eff, 1))
+        line, = ax.plot(xs, mean, label=f"{algo} (n={len(runs)})")
+        ax.fill_between(xs, mean - sem, mean + sem,
+                        color=line.get_color(), alpha=0.2, linewidth=0)
     ax.set_xlabel(f"Cumulative cost (early cutoff = {global_cutoff:g})")
-    ax.set_ylabel("Best observed value (mean over seeds)")
+    ax.set_ylabel("Best observed value (mean ± 1 SE over seeds)")
     ax.set_title(
         "BOFN early-budget-cutoff comparison\n"
         "x-axis trimmed to the smallest completed cost across all runs"
