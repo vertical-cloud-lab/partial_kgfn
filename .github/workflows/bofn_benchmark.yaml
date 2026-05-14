@@ -1,0 +1,489 @@
+name: BOFN benchmark
+
+# Runs benchmarks/bofn_actions_benchmark.py on GitHub Actions runners to
+# benchmark the paper's actual pKGFN pipeline (Buathong et al. 2024) on the
+# AckleyS function-network problem with the headline 1_49 cost split. Each
+# cell calls partial_kgfn.experiments.ackleyS_runner.main with the paper's
+# exact arguments (no oracle stand-ins, no fallbacks), and the wrapper reads
+# the per-iteration .pt checkpoint that run_one_trial writes after every BO
+# iteration so partial results survive in-process timeouts on the 6h runner.
+#
+# Algorithms (paper's seven, Sec. 5):
+#   Random, EI, KG, KGFN, EIFN, TSFN, pKGFN
+#
+# Strategy:
+#   1. smoke-test  — quick `--mode smoke` pass over Random+EI at small budget,
+#                    catches import/wiring bugs.
+#   2. full-smoke  — a single full-budget pKGFN iteration (PKGFN_MAX_ITERATIONS=1).
+#                    Catches bugs that only show up at the paper budget and on
+#                    pKGFN-specific code paths before fanning the expensive
+#                    7×30 matrix out to 210 jobs.
+#   3. full-test-{1..4} — four sequentially-chained matrices of (algo × seed),
+#                    each cell capped at the 6 h GitHub Actions per-job limit.
+#                    Chains 2-4 download the prior chain's artifact (JSON +
+#                    `.pt` checkpoint), restore them in the workspace, and
+#                    re-invoke the harness; `partial_kgfn.run_one_trial`
+#                    auto-resumes from the existing `trial_<seed>.pt`. If the
+#                    prior chain already finished (`complete: true` or
+#                    `final_cost >= budget`), the run step is skipped and the
+#                    artifact is propagated forward unchanged. This stretches
+#                    the effective per-cell wall-clock from 6 h to ~22 h while
+#                    staying inside both per-job (6 h) and per-workflow (24 h)
+#                    GitHub-hosted runner limits.
+#   4. combine     — merge the latest per-(algo,seed) JSON (highest
+#                    `final_cost` across the 4 chains) into a composite
+#                    cost-efficiency plot + summary CSV.
+#
+# Triggered on push to the listed paths and via manual workflow_dispatch.
+# The concurrency group below uses ``cancel-in-progress: false`` so push
+# events from new commits queue behind any in-flight run rather than
+# cancelling it. Manual dispatch supports shorter ``seeds`` and ``algos``
+# overrides for debugging.
+
+on:
+  push:
+    paths:
+      - 'benchmarks/bofn_actions_benchmark.py'
+      - 'partial_kgfn/**'
+      - '.github/workflows/bofn_benchmark.yaml'
+      - 'requirements.txt'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: >-
+          JSON array of seeds to run (default: 30 seeds 1..30, matching the
+          30 replications used in Buathong et al. 2024, ICML).
+          Example: "[1,2,3]" for a 3-seed debug run.
+        required: false
+        default: ''
+      algos:
+        description: >-
+          JSON array of algorithms to run (default: all seven from the paper).
+          Example: '["Random","pKGFN"]' for just two.
+        required: false
+        default: ''
+
+# Avoid cancelling an in-progress benchmark run when another dispatch is
+# triggered; queue them sequentially per ref instead.
+concurrency:
+  group: bofn-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke-test:
+    name: smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run smoke test
+        run: |
+          python benchmarks/bofn_actions_benchmark.py --mode smoke
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-smoke-artifacts
+          path: |
+            benchmarks/results/actions_smoke/
+            benchmarks/figures/actions_smoke/
+          retention-days: 14
+
+  full-smoke:
+    name: full-smoke ${{ matrix.algo }}/seed${{ matrix.seed }}
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Run a *single pKGFN iteration* end-to-end (full paper budget configured,
+    # but `PKGFN_MAX_ITERATIONS=1` stops the BO loop after the first completed
+    # iteration). Catches bugs that only appear at the full paper budget --
+    # e.g. fantasy/acqf wiring on the cost-49 node -- without burning hours
+    # before fanning out the 7×30 matrix. If this errors the rest of the run
+    # is gated off (the full-test job depends on full-smoke).
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - algo: pKGFN
+            seed: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run single pKGFN iteration (smoke gate)
+        env:
+          # Cap the BO loop at one completed post-init iteration. The init
+          # design + one pKGFN iter take ~6 minutes on the runner per the
+          # prior 9-iter run (~340 s/iter, init <30 s); 1500 s leaves ample
+          # margin and is well under the job timeout, so SIGALRM has time to
+          # surface a clean failure instead of a hard-kill.
+          PKGFN_TIMEOUT_SECONDS: '1500'
+          PKGFN_MAX_ITERATIONS: '1'
+        run: |
+          mkdir -p benchmarks/results/actions_full_smoke
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode run \
+            --algo ${{ matrix.algo }} \
+            --seed ${{ matrix.seed }} \
+            --out benchmarks/results/actions_full_smoke/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+      - name: Upload full-smoke artifact (JSON + .pt checkpoint)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-full-smoke-${{ matrix.algo }}-seed${{ matrix.seed }}
+          path: |
+            benchmarks/results/actions_full_smoke/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+            results/AckSN_1_49/${{ matrix.algo }}/trial_${{ matrix.seed }}.pt
+          retention-days: 14
+
+  full-test-1:
+    name: full-1 ${{ matrix.algo }}/seed${{ matrix.seed }}
+    needs: [smoke-test, full-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        algo: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.algos != '')
+          && github.event.inputs.algos
+          || '["Random","EI","KG","KGFN","EIFN","TSFN","pKGFN"]'
+          ) }}
+        seed: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.seeds != '')
+          && github.event.inputs.seeds
+          || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run single (algo, seed) — chain 1
+        env:
+          # 5h 30m: leaves ~30m at the end of the 6h job for the JSON-emit
+          # path that runs *after* the SIGALRM-based soft timeout fires, so
+          # even a timed-out cell still uploads a partial JSON + the latest
+          # .pt checkpoint that run_one_trial wrote at the bottom of every
+          # BO iteration. Even if the job is hard-killed before the JSON is
+          # written, the .pt checkpoint is still on disk and uploaded by
+          # the `if: always()` step below.
+          PKGFN_TIMEOUT_SECONDS: '19800'
+        run: |
+          mkdir -p benchmarks/results/actions
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode run \
+            --algo ${{ matrix.algo }} \
+            --seed ${{ matrix.seed }} \
+            --out benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+      - name: Upload chain-1 result (JSON + .pt checkpoint)
+        # `if: always()` so a timed-out / crashed step still uploads whatever
+        # partial JSON + .pt checkpoint exist on disk; the next chain resumes
+        # from the .pt, and combine-results plots an early-budget-cutoff from
+        # the survivors.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain1
+          path: |
+            benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+            results/AckSN_1_49/${{ matrix.algo }}/trial_${{ matrix.seed }}.pt
+          retention-days: 30
+
+  full-test-2:
+    name: full-2 ${{ matrix.algo }}/seed${{ matrix.seed }}
+    needs: full-test-1
+    if: always() && (needs.full-test-1.result == 'success' || needs.full-test-1.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        algo: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.algos != '')
+          && github.event.inputs.algos
+          || '["Random","EI","KG","KGFN","EIFN","TSFN","pKGFN"]'
+          ) }}
+        seed: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.seeds != '')
+          && github.event.inputs.seeds
+          || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Restore prior chain checkpoint (chain 1)
+        # download-artifact restores files at their original paths within
+        # `path`, so the .pt lands at
+        # `results/AckSN_1_49/<algo>/trial_<seed>.pt` — exactly where
+        # run_one_trial expects it for auto-resume (run_one_trial.py:105).
+        # `continue-on-error: true` so a missing artifact (chain 1
+        # hard-killed before upload) doesn't block this chain.
+        uses: actions/download-artifact@v4.1.3
+        continue-on-error: true
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain1
+          path: .
+      - name: Run single (algo, seed) — chain 2 (resumes from chain-1 .pt)
+        env:
+          PKGFN_TIMEOUT_SECONDS: '19800'
+        run: |
+          mkdir -p benchmarks/results/actions
+          json_path="benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json"
+          if [ -f "$json_path" ] && python -c "import json,sys; r=json.load(open('$json_path')); sys.exit(0 if r.get('complete') else 1)"; then
+            echo "[chain-2] Prior chain already complete; skipping run, propagating artifact."
+            exit 0
+          fi
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode run \
+            --algo ${{ matrix.algo }} \
+            --seed ${{ matrix.seed }} \
+            --out "$json_path"
+      - name: Upload chain-2 result (JSON + .pt checkpoint)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain2
+          path: |
+            benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+            results/AckSN_1_49/${{ matrix.algo }}/trial_${{ matrix.seed }}.pt
+          retention-days: 30
+
+  full-test-3:
+    name: full-3 ${{ matrix.algo }}/seed${{ matrix.seed }}
+    needs: full-test-2
+    if: always() && (needs.full-test-2.result == 'success' || needs.full-test-2.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        algo: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.algos != '')
+          && github.event.inputs.algos
+          || '["Random","EI","KG","KGFN","EIFN","TSFN","pKGFN"]'
+          ) }}
+        seed: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.seeds != '')
+          && github.event.inputs.seeds
+          || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Restore prior chain checkpoint (chain 2)
+        uses: actions/download-artifact@v4.1.3
+        continue-on-error: true
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain2
+          path: .
+      - name: Run single (algo, seed) — chain 3 (resumes from chain-2 .pt)
+        env:
+          PKGFN_TIMEOUT_SECONDS: '19800'
+        run: |
+          mkdir -p benchmarks/results/actions
+          json_path="benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json"
+          if [ -f "$json_path" ] && python -c "import json,sys; r=json.load(open('$json_path')); sys.exit(0 if r.get('complete') else 1)"; then
+            echo "[chain-3] Prior chain already complete; skipping run, propagating artifact."
+            exit 0
+          fi
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode run \
+            --algo ${{ matrix.algo }} \
+            --seed ${{ matrix.seed }} \
+            --out "$json_path"
+      - name: Upload chain-3 result (JSON + .pt checkpoint)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain3
+          path: |
+            benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+            results/AckSN_1_49/${{ matrix.algo }}/trial_${{ matrix.seed }}.pt
+          retention-days: 30
+
+  full-test-4:
+    name: full-4 ${{ matrix.algo }}/seed${{ matrix.seed }}
+    needs: full-test-3
+    if: always() && (needs.full-test-3.result == 'success' || needs.full-test-3.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        algo: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.algos != '')
+          && github.event.inputs.algos
+          || '["Random","EI","KG","KGFN","EIFN","TSFN","pKGFN"]'
+          ) }}
+        seed: ${{ fromJSON(
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.seeds != '')
+          && github.event.inputs.seeds
+          || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Restore prior chain checkpoint (chain 3)
+        uses: actions/download-artifact@v4.1.3
+        continue-on-error: true
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain3
+          path: .
+      - name: Run single (algo, seed) — chain 4 (resumes from chain-3 .pt)
+        env:
+          PKGFN_TIMEOUT_SECONDS: '19800'
+        run: |
+          mkdir -p benchmarks/results/actions
+          json_path="benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json"
+          if [ -f "$json_path" ] && python -c "import json,sys; r=json.load(open('$json_path')); sys.exit(0 if r.get('complete') else 1)"; then
+            echo "[chain-4] Prior chain already complete; skipping run, propagating artifact."
+            exit 0
+          fi
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode run \
+            --algo ${{ matrix.algo }} \
+            --seed ${{ matrix.seed }} \
+            --out "$json_path"
+      - name: Upload chain-4 result (JSON + .pt checkpoint)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-result-${{ matrix.algo }}-seed${{ matrix.seed }}-chain4
+          path: |
+            benchmarks/results/actions/${{ matrix.algo }}_seed${{ matrix.seed }}.json
+            results/AckSN_1_49/${{ matrix.algo }}/trial_${{ matrix.seed }}.pt
+          retention-days: 30
+
+  combine-results:
+    name: combine-results
+    needs: full-test-4
+    # Run combine even if some full-test cells failed (e.g. KGFN/pKGFN cells
+    # may time out across all four chains; combine still produces an
+    # early-budget-cutoff plot from the survivors and partial checkpoints).
+    if: always() && (needs.full-test-4.result == 'success' || needs.full-test-4.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies (matplotlib + numpy + torch for .pt loading)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Download all chained partial results
+        uses: actions/download-artifact@v4.1.3
+        with:
+          pattern: bofn-result-*-chain*
+          path: partial-results-raw/
+      - name: Pick latest per (algo, seed) for the combiner
+        # Each chained job uploads its current state under a chain-suffixed
+        # artifact name. Multiple chains can hold valid JSONs for the same
+        # (algo, seed) -- the highest cumulative cost wins, and on ties the
+        # higher chain number (newer run) wins.
+        run: |
+          mkdir -p partial-results
+          python - <<'PY'
+          import json, re, shutil
+          from pathlib import Path
+
+          raw = Path("partial-results-raw")
+          chosen: dict[tuple[str, int], tuple[float, int, Path]] = {}
+          for p in raw.rglob("*.json"):
+              # Artifact dirs look like
+              # bofn-result-<algo>-seed<seed>-chain<N>/benchmarks/results/actions/<algo>_seed<seed>.json
+              parts = p.parts
+              chain = None
+              for part in parts:
+                  m = re.match(r"bofn-result-.+-seed\d+-chain(\d+)$", part)
+                  if m:
+                      chain = int(m.group(1))
+                      break
+              if chain is None:
+                  continue
+              try:
+                  data = json.loads(p.read_text())
+              except Exception:
+                  continue
+              algo = data.get("algo")
+              seed = data.get("seed")
+              if algo is None or seed is None:
+                  continue
+              cost = float(data.get("final_cost") or 0.0)
+              key = (algo, int(seed))
+              prev = chosen.get(key)
+              # Tuple comparison: higher final_cost wins; on a tie, the
+              # higher chain number wins (newer run with same progress).
+              if prev is None or (cost, chain) > (prev[0], prev[1]):
+                  chosen[key] = (cost, chain, p)
+
+          out = Path("partial-results")
+          for (algo, seed), (cost, chain, src) in sorted(chosen.items()):
+              dst = out / f"{algo}_seed{seed}.json"
+              shutil.copy(src, dst)
+              print(f"{algo} seed={seed}: chain{chain} final_cost={cost}")
+          print(f"selected {len(chosen)} JSONs")
+          PY
+          ls -la partial-results/ | head -50
+      - name: Combine and plot
+        run: |
+          python benchmarks/bofn_actions_benchmark.py \
+            --mode combine \
+            --input-dir partial-results/ \
+            --out-dir benchmarks/figures/actions/
+      - name: Upload combined artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bofn-combined-${{ github.run_id }}
+          path: |
+            benchmarks/figures/actions/
+            partial-results/
+            partial-results-raw/
+          retention-days: 90
