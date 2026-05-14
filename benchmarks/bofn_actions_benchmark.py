@@ -273,16 +273,30 @@ def write_json(result: dict, out: Path) -> None:
     out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
 
-def _trajectory_step(result: dict, x_grid: np.ndarray) -> np.ndarray:
-    """Step-function interpolation of (cost, best_obs) onto a common grid.
+def _trajectory_step(result: dict, x_grid: np.ndarray,
+                     metric: str = "obj_at_best_designs") -> np.ndarray:
+    """Step-function interpolation of (cost, metric) onto a common grid.
 
-    Anything past this run's last completed cost is left as the final
-    observed value (typical right-extrapolation for cost-budget plots).
+    The default metric is ``obj_at_best_designs`` -- the *noiseless* objective
+    value at the design corresponding to the current best posterior mean.
+    This matches Fig. 4 of Buathong et al. 2024 (y-axis ``y_K(x*_n)``) and
+    is bounded above by the true global optimum (e.g. 0 for negated Ackley).
+    Plotting ``best_obs_vals`` instead would track the max of *noisy*
+    observations, which is unbounded above and grows with iteration count
+    -- biasing acquisitions that take many cheap evaluations (pKGFN) upward.
+
+    Anything past this run's last completed cost is right-extrapolated as
+    the final value (typical for cost-budget plots).
     """
     costs = np.asarray(result["cumulative_costs"], dtype=float)
-    best = np.asarray(result["best_obs_vals"], dtype=float)
+    best = np.asarray(result.get(metric) or [], dtype=float)
     if len(costs) == 0 or len(best) == 0:
         return np.full_like(x_grid, np.nan, dtype=float)
+    # Align lengths defensively: paper sometimes records `runtimes` etc. one
+    # step ahead of `obj_at_best_designs` if a run was interrupted mid-iter.
+    n = min(len(costs), len(best))
+    costs = costs[:n]
+    best = best[:n]
     if len(costs) == 1:
         return np.full_like(x_grid, best[0], dtype=float)
     # Step function: at cost c >= costs[i], best is best[i] (until costs[i+1]).
@@ -310,13 +324,19 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
     summary_path = out_dir / "summary.csv"
     fieldnames = [
         "algo", "seed", "complete", "trial_ok", "n_iterations_completed",
-        "final_cost", "final_best_obs_val", "budget",
+        "final_cost", "final_obj_at_best_design", "final_best_post_mean",
+        "final_best_obs_val", "budget",
     ]
     with summary_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
-            writer.writerow({k: r.get(k) for k in fieldnames})
+            row = {k: r.get(k) for k in fieldnames}
+            obj = r.get("obj_at_best_designs") or []
+            post = r.get("best_post_means") or []
+            row["final_obj_at_best_design"] = obj[-1] if obj else None
+            row["final_best_post_mean"] = post[-1] if post else None
+            writer.writerow(row)
 
     algos = sorted({r["algo"] for r in results})
 
@@ -340,10 +360,11 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
         ax.fill_between(xs, mean - sem, mean + sem,
                         color=line.get_color(), alpha=0.2, linewidth=0)
     ax.set_xlabel("Cumulative cost")
-    ax.set_ylabel("Best observed value (mean ± 1 SE over seeds)")
+    ax.set_ylabel(r"Objective at recommended design $y_K(x^*_n)$ "
+                  "(mean $\\pm$ 1 SE over seeds)")
     ax.set_title(
         "BOFN cost-efficiency on AckleyS (paper pKGFN pipeline)\n"
-        "extends each run to its own final cost; partial runs included"
+        "y-axis matches Buathong et al. 2024 Fig. 4 (negated Ackley, max=0)"
     )
     ax.legend(loc="best", fontsize="small")
     fig.tight_layout()
@@ -381,7 +402,8 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
         ax.fill_between(xs, mean - sem, mean + sem,
                         color=line.get_color(), alpha=0.2, linewidth=0)
     ax.set_xlabel(f"Cumulative cost (early cutoff = {global_cutoff:g})")
-    ax.set_ylabel("Best observed value (mean ± 1 SE over seeds)")
+    ax.set_ylabel(r"Objective at recommended design $y_K(x^*_n)$ "
+                  "(mean $\\pm$ 1 SE over seeds)")
     ax.set_title(
         "BOFN early-budget-cutoff comparison\n"
         "x-axis trimmed to the smallest completed cost across all runs"
@@ -406,8 +428,9 @@ def combine_results(input_dir: Path, out_dir: Path) -> None:
         box_labels.append(algo)
     if box_data:
         ax.boxplot(box_data, tick_labels=box_labels, showmeans=True)
-    ax.set_ylabel(f"Best observed value at cost = {global_cutoff:g}")
-    ax.set_title("BOFN final-value distribution at the early-cutoff budget")
+    ax.set_ylabel(r"$y_K(x^*_n)$ at cost = " + f"{global_cutoff:g}")
+    ax.set_title("BOFN final-value distribution at the early-cutoff budget\n"
+                 "(noiseless objective at recommended design)")
     fig.tight_layout()
     fig.savefig(out_dir / "final_value_boxplot.png", dpi=150)
     plt.close(fig)
